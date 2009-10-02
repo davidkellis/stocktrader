@@ -1,6 +1,6 @@
 $:.unshift File.join(File.dirname(__FILE__), '..')
 
-require 'simulator.rb'
+require 'simulator'
 
 class BuyAndHoldStrategy < Strategy
   def initialize(account, tickers_to_trade, timestamp_to_sell)

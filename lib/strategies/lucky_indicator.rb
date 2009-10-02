@@ -1,6 +1,6 @@
 $:.unshift File.join(File.dirname(__FILE__), '..')
 
-require 'simulator.rb'
+require 'simulator'
 require 'extrb'
 
 # This is the trading strategy that Dr. Rushton told me about and wanted me 

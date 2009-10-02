@@ -3,23 +3,13 @@ require 'pp'
 require 'activesupport'
 require 'extrb'
 
-module BarConversions
-  def to_bars(seconds_per_bar)
-    # assumes self is in seconds
-    self.to_i / seconds_per_bar
-  end
-end
-
-class Fixnum
-  include BarConversions
-end
-
 class Bar
-  attr_accessor :date, :time, :open, :high, :low, :close
+  attr_accessor :date, :time, :id, :open, :high, :low, :close
   
-  def initialize(date=0, time=0, open=0, high=0, low=0, close=0)
+  def initialize(date=0, time=0, id=0, open=0, high=0, low=0, close=0)
     self.date = date
     self.time = time
+    self.id = id
     self.open = open.to_f
     self.high = high.to_f
     self.low = low.to_f
@@ -39,7 +29,7 @@ class PriceHistory
     lines = File.readlines(filename)
     lines.each do |line|
       # record format: Date,Time,Open,High,Low,Close
-      @history << Bar.new(*line.strip.split(','))
+      @history << Bar.new(*line.strip.split(',').values_at(3..9))
     end
   end
   
@@ -70,17 +60,12 @@ class Exchange
     end
   end
   
-  def bar(ticker, bars_ago)
-    bars_ago = [1, bars_ago].max
-    price_histories[ticker][bars_ago - 1] || Bar.new     # Note: the OR expression is a fix for when there is not enough data
+  def bar(ticker, bar_index)
+    price_histories[ticker][bar_index] || Bar.new     # Note: the OR expression is a fix for when there is not enough data
   end
   
-  def quote(ticker, bars_ago)
-    bar(ticker, bars_ago).close
-  end
-  
-  def bars_between(ticker, bars_ago_recent, bars_ago_oldest)
-    price_histories[ticker][(bars_ago_recent - 1)..(bars_ago_oldest - 1)] || []    # Note: the OR expression is a fix for when there is not enough data
+  def quote(ticker, bar_index)
+    bar(ticker, bar_index).close
   end
 end
 
@@ -98,20 +83,20 @@ class Broker
   end
   
   # buy as much as possible [with the given amount]
-  def buy_amap(account, ticker, bars_ago, amount = nil)
+  def buy_amap(account, ticker, bar_index, amount = nil)
     amount ||= account.cash
     amount = [amount, account.cash].min
-    max_shares = ((amount - buy_commission) / exchange.quote(ticker, bars_ago)).floor
+    max_shares = ((amount - buy_commission) / exchange.quote(ticker, bar_index)).floor
     if max_shares > 0
-      buy(account, ticker, max_shares, bars_ago)
+      buy(account, ticker, max_shares, bar_index)
     else
       0
     end
   end
   
   # buy a number of shares or none at all
-  def buy(account, ticker, shares, bars_ago)
-    cost = exchange.quote(ticker, bars_ago) * shares
+  def buy(account, ticker, shares, bar_index)
+    cost = exchange.quote(ticker, bar_index) * shares
     if cost >= 0 && account.cash >= cost + buy_commission
       account.cash -= (cost + buy_commission)
       account.portfolio[ticker] += shares
@@ -122,14 +107,14 @@ class Broker
     end
   end
   
-  def sell_all(account, ticker, bars_ago)
-    sell(account, ticker, account.portfolio[ticker], bars_ago)
+  def sell_all(account, ticker, bar_index)
+    sell(account, ticker, account.portfolio[ticker], bar_index)
   end
   
   # sell a number of shares, up to the number in the portfolio
-  def sell(account, ticker, shares, bars_ago)
+  def sell(account, ticker, shares, bar_index)
     shares = [shares, account.portfolio[ticker]].min
-    gross_profit = exchange.quote(ticker, bars_ago) * shares
+    gross_profit = exchange.quote(ticker, bar_index) * shares
     post_sale_cash_balance = account.cash + gross_profit
     if(gross_profit >= 0 && post_sale_cash_balance >= sell_commission && account.portfolio[ticker] > 0 && shares > 0)
       account.cash = post_sale_cash_balance - sell_commission
@@ -138,6 +123,42 @@ class Broker
       shares
     else
       0         # return that 0 shares were sold
+    end
+  end
+  
+  # buy a number of shares, potentially on margin
+  def buy_margin(account, ticker, shares, bar_index)
+    cost = exchange.quote(ticker, bar_index) * shares
+    if cost >= 0
+      account.cash -= (cost + buy_commission)
+      account.portfolio[ticker] += shares
+      account.commission_paid += buy_commission
+      shares    # return the number of shares bought
+    else
+      0         # return that 0 shares were bought
+    end
+  end
+  
+  def sell_short(account, ticker, shares, bar_index)
+    gross_profit = exchange.quote(ticker, bar_index) * shares
+    post_sale_cash_balance = account.cash + gross_profit
+    if(gross_profit >= 0 && post_sale_cash_balance >= sell_commission && shares > 0)
+      account.cash = post_sale_cash_balance - sell_commission
+      account.portfolio[ticker] -= shares
+      account.commission_paid += sell_commission
+      shares
+    else
+      0         # return that 0 shares were sold
+    end
+  end
+  
+  def sell_short_amt(account, ticker, bar_index, amount = nil)
+    amount ||= account.cash > 0 ? account.cash : 0
+    max_shares = ((amount - sell_commission) / exchange.quote(ticker, bar_index)).floor
+    if max_shares > 0
+      sell_short(account, ticker, max_shares, bar_index)
+    else
+      0
     end
   end
 end
@@ -151,30 +172,49 @@ class Account
   def initialize(broker, cash)
     @broker = broker
     @cash = cash.to_f
+    @initial_cash = @cash
+    @portfolio = Hash.new(0)
+    @commission_paid = 0
+  end
+
+  def reset
+    @cash = @initial_cash
     @portfolio = Hash.new(0)
     @commission_paid = 0
   end
 
   # buy as much as possible [with the given amount]
-  def buy_amap(ticker, bars_ago, amount = nil)
-    broker.buy_amap(self, ticker, bars_ago, amount)
+  def buy_amap(ticker, bar_index, amount = nil)
+    broker.buy_amap(self, ticker, bar_index, amount)
   end
   
   # buy a number of shares or none at all
-  def buy(ticker, shares, bars_ago)
-    broker.buy(self, ticker, shares, bars_ago)
+  def buy(ticker, shares, bar_index)
+    broker.buy(self, ticker, shares, bar_index)
   end
   
   # sell all shares held of a stock - completely liquidate the holdings of a particular ticker symbol
-  def sell_all(ticker, bars_ago)
-    broker.sell_all(self, ticker, bars_ago)
+  def sell_all(ticker, bar_index)
+    broker.sell_all(self, ticker, bar_index)
   end
 
   # sell a number of shares, up to the number in the portfolio
-  def sell(ticker, shares, bars_ago)
-    broker.sell(self, ticker, shares, bars_ago)
+  def sell(ticker, shares, bar_index)
+    broker.sell(self, ticker, shares, bar_index)
   end
   
+  def buy_margin(ticker, shares, bar_index)
+    broker.buy_margin(self, ticker, shares, bar_index)
+  end
+  
+  def sell_short(ticker, shares, bar_index)
+    broker.sell_short(self, ticker, shares, bar_index)
+  end
+  
+  def sell_short_amt(ticker, bar_index, amount = nil)
+    broker.sell_short_amt(self, ticker, bar_index, amount)
+  end
+
   def value(bar)
     stock_value = 0
     portfolio.each_pair do |ticker, shares|
@@ -183,10 +223,10 @@ class Account
     cash + stock_value
   end
   
-  def to_s(bar = 1)
+  def to_s(bar)
     "cash: #{cash}\n" +
       "commission_paid: #{commission_paid}\n" +
-      "portfolio holdings as of #{bar} bars ago: #{portfolio.inspect}\n" +
+      "portfolio holdings as of bar #{bar}: #{portfolio.inspect}\n" +
       "value: #{value(bar)}"
   end
 end
@@ -203,18 +243,104 @@ class Strategy
   end
   
   # start_bar is a larger number than end_bar
-  def run(start_bar, end_bar = 1, bar_specificity = 1)
+  def run(start_bar, end_bar, bar_increment = 1)
     bar = start_bar
-    while(bar >= end_bar)
-      #recompute the amount we can invest in each company during this round of investing
-      @amount_per_company = account.cash / tickers_to_trade.length
+    
+    catch :abort_simulation do
+      while(bar <= end_bar)
+        #recompute the amount we can invest in each company during this round of investing
+        @amount_per_company = account.cash / tickers_to_trade.length
       
-      for ticker in tickers_to_trade
-        trade(ticker, bar)
+        for ticker in tickers_to_trade
+          trade(ticker, bar)
+        end
+      
+        bar += bar_increment    # move one bar ahead
       end
-      
-      bar -= bar_specificity    # move one bar ahead
     end
+  end
+end
+
+class ExpectationMeanStrategy < Strategy
+  Modes = [:long, :short]
+  
+  def initialize(account, tickers_to_trade, small_gain, large_gain, small_loss, large_loss)
+    super(account, tickers_to_trade)
+    
+    @small_gain = small_gain
+    @large_gain = large_gain
+    @small_loss = small_loss
+    @large_loss = large_loss
+    
+    reset
+  end
+  
+  def trade(ticker, bar)
+    if @state == 0
+      case @mode
+      when :long
+        s = account.buy_amap(ticker, bar, amount_per_company)
+      when :short
+        s = account.sell_short_amt(ticker, bar, amount_per_company)
+      end
+      @origin_price = account.broker.exchange.quote(ticker, bar)
+      state += 1
+    elsif state == 1
+      gain = current_gain(ticker, bar)
+      if gain >= @small_gain
+        liquidate_position(ticker, bar)
+      elsif gain <= @large_loss
+        liquidate_position(ticker, bar)
+      elsif gain <= @small_loss
+        @state = 2
+      end
+    elsif state == 2
+      gain = current_gain(ticker, bar)
+      if gain >= @large_gain
+        liquidate_position(ticker, bar)
+      elsif gain <= @large_loss
+        liquidate_position(ticker, bar)
+      end
+    end
+  end
+  
+  def liquidate_position(ticker, bar, shares_short = 0)
+    case @mode
+    when :long
+      s = account.sell_all(ticker, bar)
+    when :short
+      s = account.buy_margin(ticker, shares_short, bar)
+    end
+    
+    throw :abort_simulation
+  end
+  
+  def current_gain(ticker, bar)
+    case @mode
+    when :long
+      (account.broker.exchange.quote(ticker, bar) / @origin_price.to_f) - 1
+    when :short
+      (@origin_price.to_f / account.broker.exchange.quote(ticker, bar)) - 1
+    end
+  end
+  
+  def reset
+    account.reset
+    @state = 0
+    @mode = Modes.rand
+    @origin_price = 0
+  end
+  
+  def to_s
+    "ExpectationMeanStrategy:\n" +
+    "  Small Gain/Loss #{@small_gain}/#{@small_loss}\n" +
+    "  Large Gain/Loss #{@large_gain}/#{@large_loss}\n" +
+    "  Tickers: #{tickers_to_trade.join(', ')}\n" +
+    "  Account: #{account.to_s}"
+  end
+  
+  def parameter_set
+    "ExpectationMeanStrategy: Small Gain/Loss #{@small_gain}/#{@small_loss} ; Large Gain/Loss #{@large_gain}/#{@large_loss}"
   end
 end
 

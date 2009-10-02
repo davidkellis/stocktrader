@@ -2,6 +2,7 @@ $:.unshift File.join(File.dirname(__FILE__), 'experiments')
 
 require 'randomized_buy_and_hold'
 require 'randomized_lucky_indicator'
+require 'expectation_mean'
 
 def main
   #$DEBUG = true
@@ -31,10 +32,15 @@ def extract_first_last_lines_compute_gain
   tickers.map(&last_over_first).sort(){|triple1, triple2| triple1[2]<=>triple2[2] }.each{|triple| pp triple }
 end
 
+def expectation_value
+  scalable_randomized_expectation_mean
+end
+
 #$DEBUG = true
 
 #main
 #extract_first_last_lines_compute_gain
 
 #buy_and_hold
-bh_vs_lucky
+#bh_vs_lucky
+expectation_value

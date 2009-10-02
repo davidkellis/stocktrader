@@ -129,10 +129,10 @@ class Broker
     end
   end
   
-  # buy a number of shares or none at all
-  def buy(account, ticker, shares, timestamp)
+  # buy a number of shares (potentially on margin) or none at all
+  def buy(account, ticker, shares, timestamp, on_margin = false)
     cost = exchange.quote(ticker, timestamp) * shares
-    if cost >= 0 && account.cash >= cost + buy_commission
+    if cost >= 0 && (account.cash >= cost + buy_commission || on_margin)
       account.cash -= (cost + buy_commission)
       account.portfolio[ticker] += shares
       account.commission_paid += buy_commission
@@ -162,6 +162,29 @@ class Broker
     end
   end
   
+  def sell_short(account, ticker, shares, timestamp)
+    gross_profit = exchange.quote(ticker, timestamp) * shares
+    post_sale_cash_balance = account.cash + gross_profit
+    if(gross_profit >= 0 && post_sale_cash_balance >= sell_commission && shares > 0)
+      account.cash = post_sale_cash_balance - sell_commission
+      account.portfolio[ticker] -= shares
+      account.commission_paid += sell_commission
+      shares
+    else
+      0         # return that 0 shares were sold
+    end
+  end
+  
+  def sell_short_amt(account, ticker, timestamp, amount = nil)
+    amount ||= account.cash > 0 ? account.cash : 0
+    max_shares = ((amount - sell_commission) / exchange.quote(ticker, timestamp)).floor
+    if max_shares > 0
+      sell_short(account, ticker, max_shares, timestamp)
+    else
+      0
+    end
+  end
+  
   def bar(ticker, timestamp)
     exchange.bar(ticker, timestamp)
   end
@@ -180,6 +203,13 @@ class Account
   def initialize(broker, cash)
     @broker = broker
     @cash = cash.to_f
+    @initial_cash = @cash
+    @portfolio = Hash.new(0)
+    @commission_paid = 0
+  end
+
+  def reset
+    @cash = @initial_cash
     @portfolio = Hash.new(0)
     @commission_paid = 0
   end
@@ -190,8 +220,8 @@ class Account
   end
   
   # buy a number of shares or none at all
-  def buy(ticker, shares, timestamp)
-    broker.buy(self, ticker, shares, timestamp)
+  def buy(ticker, shares, timestamp, on_margin = false)
+    broker.buy(self, ticker, shares, timestamp, on_margin)
   end
   
   # sell all shares held of a stock - completely liquidate the holdings of a particular ticker symbol
@@ -202,6 +232,14 @@ class Account
   # sell a number of shares, up to the number in the portfolio
   def sell(ticker, shares, timestamp)
     broker.sell(self, ticker, shares, timestamp)
+  end
+  
+  def sell_short(ticker, shares, timestamp)
+    broker.sell_short(self, ticker, shares, timestamp)
+  end
+  
+  def sell_short_amt(ticker, timestamp, amount = nil)
+    broker.sell_short_amt(self, ticker, timestamp, amount)
   end
   
   def value(timestamp)
@@ -244,17 +282,19 @@ class Strategy
     # ensure that timestamp is within a valid trading period
     t = next_trading_period(t) unless within_trading_days?(t) && within_trading_hours?(t)
     
-    while(t <= time_end)
-      #recompute the amount we can invest in each company during this round of investing
-      @amount_per_company = account.cash / tickers_to_trade.length
+    catch :abort_strategy do
+      while(t <= time_end)
+        #recompute the amount we can invest in each company during this round of investing
+        @amount_per_company = account.cash / tickers_to_trade.length
       
-      for ticker in tickers_to_trade
-        trade(ticker, t.to_timestamp.to_i)
+        for ticker in tickers_to_trade
+          trade(ticker, t.to_timestamp.to_i)
+        end
+      
+        t += time_increment_in_seconds
+      
+        t = next_trading_period(t) unless within_trading_days?(t) && within_trading_hours?(t)
       end
-      
-      t += time_increment_in_seconds
-      
-      t = next_trading_period(t) unless within_trading_days?(t) && within_trading_hours?(t)
     end
   end
   
